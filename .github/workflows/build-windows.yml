@@ -42,10 +42,14 @@ jobs:
             --collect-all pyqtgraph `
             gui/app.py
 
-      - name: Compress Build Folder
+      - name: Clean Unused Large Blobs & Compress Archive
         shell: pwsh
         run: |
-          Compress-Archive -Path dist/VirtuaScan -DestinationPath VirtuaScan-v1.0.0-Windows-x64.zip
+          # Remove heavy test files and static libraries from PyTorch bundle
+          Get-ChildItem -Path "dist/VirtuaScan" -Recurse -Include "*.lib", "*.pdb", "test", "tests" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          
+          # Use 7-Zip with standard Zip format and high compression to stay well under 2GB
+          7z a -tzip -mx=7 VirtuaScan-v1.0.0-Windows-x64.zip ./dist/VirtuaScan
 
       - name: Create GitHub Release & Upload Binary
         uses: softprops/action-gh-release@v2
