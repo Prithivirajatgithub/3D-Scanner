@@ -1,9 +1,13 @@
-name: Build Windows Executable
+name: Build and Release Windows Executable
 
 on:
   push:
-    branches: [ feature/windows-cross-platform ]
+    tags:
+      - 'v*'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build-windows:
@@ -29,7 +33,8 @@ jobs:
       - name: Package Executable with PyInstaller
         run: |
           pyinstaller --noconfirm --onedir --windowed `
-            --name "Handheld3DScanner" `
+            --name "VirtuaScan" `
+            --icon "gui/icon.ico" `
             --add-data "gui;gui" `
             --add-data "src;src" `
             --add-data "scripts;scripts" `
@@ -37,8 +42,41 @@ jobs:
             --collect-all pyqtgraph `
             gui/app.py
 
-      - name: Upload Windows Executable Artifact
-        uses: actions/upload-artifact@v4
+      - name: Compress Build Folder
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/VirtuaScan -DestinationPath VirtuaScan-v1.0.0-Windows-x64.zip
+
+      - name: Create GitHub Release & Upload Binary
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
-          name: Handheld3DScanner-Windows-x64
-          path: dist/Handheld3DScanner/
+          name: "VirtuaScan v1.0.0 - Windows Release"
+          prerelease: true
+          files: VirtuaScan-v1.0.0-Windows-x64.zip
+          body: |
+            ### VirtuaScan v1.0.0 (Beta Preview)
+
+            **VirtuaScan** is a standalone, real-time 3D surface scanning and reconstruction suite built with Open3D and PyTorch. This initial Windows build is currently in the **testing / pre-release stage**.
+
+            ---
+
+            ### Hardware Compatibility & Testing
+            * **Supported Cameras:** Intel RealSense Depth Cameras (D400 series).
+            * **Validated Device:** Actively benchmarked and verified with the **Intel RealSense D456**.
+            * **Interface:** USB 3.0 / 3.2 Gen 1 (High-speed port required for full-bandwidth RGB-D stream).
+
+            ---
+
+            ### Prerequisites Before Running
+            To ensure hardware communication and GPU acceleration on Windows, please install:
+            1. **[Intel RealSense SDK 2.0](https://github.com/IntelRealSense/librealsense/releases)** (Required for UVC/Depth drivers).
+            2. **[Microsoft Visual C++ 2015–2022 Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe)**.
+            3. **NVIDIA GPU Driver** (Recommended for accelerated TSDF / CUDA pipeline).
+
+            ---
+
+            ### Quick Start
+            1. Download and extract `VirtuaScan-v1.0.0-Windows-x64.zip`.
+            2. Connect your Intel RealSense camera to a USB 3.0 port.
+            3. Run `VirtuaScan.exe` inside the extracted folder.
