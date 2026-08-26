@@ -1,0 +1,45 @@
+name: Build Windows Executable
+
+on:
+  push:
+    branches: [ feature/windows-cross-platform ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+          pip install PySide6 open3d pyqtgraph PyOpenGL pyrealsense2 opencv-python pyinstaller
+
+      - name: Package Executable with PyInstaller
+        run: |
+          pyinstaller --noconfirm --onedir --windowed `
+            --name "Handheld3DScanner" `
+            --add-data "gui;gui" `
+            --add-data "src;src" `
+            --add-data "scripts;scripts" `
+            --collect-all open3d `
+            --collect-all pyqtgraph `
+            gui/app.py
+
+      - name: Upload Windows Executable Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Handheld3DScanner-Windows-x64
+          path: dist/Handheld3DScanner/
