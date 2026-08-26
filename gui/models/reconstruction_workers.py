@@ -21,15 +21,21 @@ class BaseReconstructionWorker(QObject):
     progress_changed = Signal(str, float)  # Stage, 0.0 - 1.0
     finished = Signal(str)                 # Output Mesh Path
     failed = Signal(str, str)              # Error Title, Error Message
+    cancelled = Signal()                   # Cancellation confirmation
 
     def __init__(self, session_path: str, output_3d_dir: str):
         super().__init__()
         self.session_path = session_path
         self.output_3d_dir = output_3d_dir
+        self._is_cancelled = False
+
+    def request_cancel(self):
+        """Thread-safe flag to request early worker termination."""
+        self._is_cancelled = True
 
 
 class Open3DTSDFWorker(BaseReconstructionWorker):
-    """Proven high-precision volumetric TSDF integration via Open3D ScalableTSDFVolume."""
+    """Volumetric TSDF integration with cooperative cancellation checks."""
     def __init__(self, session_path: str, output_3d_dir: str, voxel_size: float = 0.004):
         super().__init__(session_path, output_3d_dir)
         self.voxel_size = voxel_size
@@ -37,7 +43,11 @@ class Open3DTSDFWorker(BaseReconstructionWorker):
     @Slot()
     def run(self):
         try:
-            self.progress_changed.emit("Loading Session Data...", 0.10)
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
+
+            self.progress_changed.emit("Loading Session Data...", 0.05)
             rgb_dir = os.path.join(self.session_path, "rgb")
             depth_dir = os.path.join(self.session_path, "depth")
             cam_k_path = os.path.join(self.session_path, "cam_K.txt")
@@ -69,6 +79,11 @@ class Open3DTSDFWorker(BaseReconstructionWorker):
             prev_rgbd = None
 
             for idx, (rf, df) in enumerate(zip(rgb_files, depth_files)):
+                # Periodic cancellation check during long frame processing
+                if self._is_cancelled:
+                    self.cancelled.emit()
+                    return
+
                 color = o3d.io.read_image(rf)
                 depth = o3d.io.read_image(df)
                 rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
@@ -87,12 +102,20 @@ class Open3DTSDFWorker(BaseReconstructionWorker):
                 volume.integrate(rgbd, intrinsics, np.linalg.inv(curr_pose))
                 prev_rgbd = rgbd
 
-                progress = 0.10 + (idx / total_frames) * 0.70
+                progress = 0.05 + (idx / total_frames) * 0.75
                 self.progress_changed.emit(f"Integrating Frame {idx+1}/{total_frames}", progress)
+
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
 
             self.progress_changed.emit("Extracting Polygon Mesh...", 0.85)
             mesh = volume.extract_triangle_mesh()
             mesh.compute_vertex_normals()
+
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
 
             os.makedirs(self.output_3d_dir, exist_ok=True)
             sess_name = os.path.basename(self.session_path)
@@ -107,14 +130,29 @@ class Open3DTSDFWorker(BaseReconstructionWorker):
 
 
 class BundleSDFWorker(BaseReconstructionWorker):
-    """Subprocess Neural Solver with robust IPC environment and failure handling."""
+    """Subprocess Neural Solver with active process killing upon user cancellation."""
     def __init__(self, session_path: str, output_3d_dir: str, project_root: str):
         super().__init__(session_path, output_3d_dir)
         self.project_root = project_root
+        self._proc = None
+
+    def request_cancel(self):
+        """Terminates the active neural solver process immediately."""
+        self._is_cancelled = True
+        if self._proc and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+                self._proc.kill()
+            except Exception:
+                pass
 
     @Slot()
     def run(self):
         try:
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
+
             self.progress_changed.emit("Verifying Session Assets...", 0.03)
 
             rgb_dir = os.path.join(self.session_path, "rgb")
@@ -161,8 +199,7 @@ class BundleSDFWorker(BaseReconstructionWorker):
 
             self.progress_changed.emit("Launching Neural Solver...", 0.10)
 
-            # Launch BundleSDF maintaining full frame continuity for feature tracking
-            proc = subprocess.Popen(
+            self._proc = subprocess.Popen(
                 [
                     sys.executable, solver_script,
                     "--video_dir", self.session_path,
@@ -179,7 +216,12 @@ class BundleSDFWorker(BaseReconstructionWorker):
             )
 
             output_log = []
-            for line in iter(proc.stdout.readline, ''):
+            for line in iter(self._proc.stdout.readline, ''):
+                if self._is_cancelled:
+                    self._proc.kill()
+                    self.cancelled.emit()
+                    return
+
                 output_log.append(line)
                 if len(output_log) > 40:
                     output_log.pop(0)
@@ -204,12 +246,17 @@ class BundleSDFWorker(BaseReconstructionWorker):
                         progress = 0.85 + (cur_tex / tot_tex) * 0.13
                         self.progress_changed.emit(f"Baking UV Texture [{cur_tex}/{tot_tex}]", progress)
 
-            proc.wait()
-            if proc.returncode != 0:
+            self._proc.wait()
+
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
+
+            if self._proc.returncode != 0:
                 err_snippet = "".join(output_log[-12:]) if output_log else "No output from solver."
                 self.failed.emit(
                     "Tracking Failure",
-                    f"BundleSDF tracking was lost around the middle frames due to rapid sensor motion or low feature texture.\n\n"
+                    f"BundleSDF tracking failed or was lost during frame processing.\n\n"
                     f"Error Details:\n{err_snippet}"
                 )
                 return

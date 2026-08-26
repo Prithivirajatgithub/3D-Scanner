@@ -31,6 +31,13 @@ class ScannerController(QObject):
         self.camera_thread = None
         self.camera_worker = None
 
+        # Cache default initial button appearance
+        self.default_recon_btn_style = self.view.control_panel.run_recon_btn.styleSheet()
+        self.default_recon_btn_text = self.view.control_panel.run_recon_btn.text()
+
+        # Track reconstruction running state
+        self.is_reconstructing = False
+
         # Connect UI signals
         self.view.scan_triggered.connect(self.on_scan_triggered)
         self.view.export_requested.connect(self.on_export_requested)
@@ -38,7 +45,9 @@ class ScannerController(QObject):
         self.view.view_3d.clear_requested.connect(self.on_viewport_cleared)
         self.view.control_panel.refresh_btn.clicked.connect(self.refresh_sessions)
         self.view.control_panel.session_selected.connect(self.on_session_selected)
-        self.view.control_panel.reconstruct_requested.connect(self.on_run_reconstruction)
+        
+        # Intercept reconstruction trigger via unified toggle handler
+        self.view.control_panel.reconstruct_requested.connect(self.handle_reconstruction_toggle)
         self.view.control_panel.open_folder_requested.connect(self.on_browse_folder)
 
         self.refresh_sessions()
@@ -71,10 +80,38 @@ class ScannerController(QObject):
                 self.view.control_panel.set_sessions([sess])
 
     @Slot(str, str, dict)
-    def on_run_reconstruction(self, session_path: str, algo_name: str, params: dict):
-        self.view.control_panel.run_recon_btn.setEnabled(False)
+    def handle_reconstruction_toggle(self, session_path: str, algo_name: str, params: dict):
+        """Toggles between starting reconstruction and cancelling an active run."""
+        if self.is_reconstructing:
+            self.cancel_reconstruction()
+        else:
+            self.start_reconstruction(session_path, algo_name, params)
+
+    def start_reconstruction(self, session_path: str, algo_name: str, params: dict):
+        self.is_reconstructing = True
+
+        # Switch button to Cancel state (Red)
+        btn = self.view.control_panel.run_recon_btn
+        btn.setText("CANCEL RECONSTRUCTION")
+        btn.setStyleSheet("""
+            QPushButton {
+                background-color: #d32f2f;
+                color: #ffffff;
+                font-weight: bold;
+                border: none;
+                border-radius: 4px;
+                padding: 6px;
+            }
+            QPushButton:hover {
+                background-color: #b71c1c;
+            }
+            QPushButton:pressed {
+                background-color: #7f0000;
+            }
+        """)
         self.view.save_btn.setEnabled(False)
         self.view.control_panel.set_active_device_state("CPU")
+
         self.recon_thread = QThread()
 
         if "Open3D" in algo_name:
@@ -91,28 +128,76 @@ class ScannerController(QObject):
         self.recon_worker.progress_changed.connect(self.on_recon_progress)
         self.recon_worker.finished.connect(self.on_recon_finished)
         self.recon_worker.failed.connect(self.on_recon_failed)
+        self.recon_worker.cancelled.connect(self.on_recon_cancelled)
 
         self.recon_thread.start()
+
+    def cancel_reconstruction(self):
+        if self.recon_worker:
+            self.view.control_panel.status_lbl.setText("Status: Cancelling...")
+            self.recon_worker.request_cancel()
+
+    def _reset_reconstruction_ui(self):
+        """Restores the UI and button back to the ready/idle state with full green styling."""
+        self.is_reconstructing = False
+        btn = self.view.control_panel.run_recon_btn
+        btn.setText(self.default_recon_btn_text if self.default_recon_btn_text else "RUN RECONSTRUCTION")
+        
+        # Restore original stylesheet or fallback to exact VirtuaScan teal-cyan green
+        if self.default_recon_btn_style:
+            btn.setStyleSheet(self.default_recon_btn_style)
+        else:
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #00897b;
+                    color: #ffffff;
+                    font-weight: bold;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 6px;
+                }
+                QPushButton:hover {
+                    background-color: #00796b;
+                }
+                QPushButton:pressed {
+                    background-color: #004d40;
+                }
+            """)
+
+        btn.setEnabled(True)
+        self.view.control_panel.set_active_device_state(False)
+
+        if self.recon_thread:
+            self.recon_thread.quit()
+            self.recon_thread.wait(2000)
+            self.recon_thread = None
+            self.recon_worker = None
 
     @Slot(str, float)
     def on_recon_progress(self, stage: str, pct: float):
         self.view.control_panel.status_lbl.setText(f"Status: {stage}")
         self.view.control_panel.progress_bar.setValue(int(pct * 100))
-        
 
     @Slot(str)
     def on_recon_finished(self, mesh_path: str):
-        self.view.control_panel.run_recon_btn.setEnabled(True)
-        self.view.control_panel.set_active_device_state(False)
-    
-        if self.recon_thread:
-            self.recon_thread.quit()
-            self.recon_thread.wait()
-
+        self._reset_reconstruction_ui()
         self.view.status_bar.showMessage(
             f"Reconstruction Complete: {os.path.basename(mesh_path)}"
         )
         self._load_and_display_mesh(mesh_path)
+
+    @Slot(str, str)
+    def on_recon_failed(self, title: str, msg: str):
+        self._reset_reconstruction_ui()
+        self.view.control_panel.status_lbl.setText("Status: Reconstruction Failed")
+        self.view.show_error_popup(title, msg)
+
+    @Slot()
+    def on_recon_cancelled(self):
+        self._reset_reconstruction_ui()
+        self.view.control_panel.status_lbl.setText("Status: Reconstruction Cancelled")
+        self.view.control_panel.progress_bar.setValue(0)
+        self.view.status_bar.showMessage("Reconstruction process cancelled by user.")
 
     def _load_and_display_mesh(self, file_path: str):
         """Loads OBJ/STL/PLY/PCD and renders directly in the 3D inspection viewport."""
@@ -184,16 +269,6 @@ class ScannerController(QObject):
         self.current_mesh_path = None
         self.view.save_btn.setEnabled(False)
         self.view.status_bar.showMessage("Viewport Cleared | Ready")
-
-    @Slot(str, str)
-    def on_recon_failed(self, title: str, msg: str):
-        self.view.control_panel.run_recon_btn.setEnabled(True)
-        self.view.control_panel.set_active_device_state(False)
-        
-        if self.recon_thread:
-            self.recon_thread.quit()
-            self.recon_thread.wait()
-        self.view.show_error_popup(title, msg)
 
     @Slot()
     def on_export_requested(self):
