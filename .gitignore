@@ -1,0 +1,26 @@
+# Python bytecode & cache
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.env/
+env/
+
+# Datasets, scan data & heavy 3D mesh outputs
+data/
+dataset/
+output_3d/
+third_party/bundlesdf/output/
+*.obj
+*.ply
+*.stl
+*.png
+*.jpg
+
+# Build and IDE artifacts
+dist/
+build/
+*.spec
+*.egg-info/
+.vscode/
+.idea/
