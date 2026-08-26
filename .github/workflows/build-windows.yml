@@ -42,14 +42,14 @@ jobs:
             --collect-all pyqtgraph `
             gui/app.py
 
-      - name: Clean Unused Large Blobs & Compress Archive
+      - name: Prune Blobs & Create Ultra 7z Archive
         shell: pwsh
         run: |
-          # Remove heavy test files and static libraries from PyTorch bundle
-          Get-ChildItem -Path "dist/VirtuaScan" -Recurse -Include "*.lib", "*.pdb", "test", "tests" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          # Strip unnecessary developer headers, test suites, and pdb files
+          Get-ChildItem -Path "dist/VirtuaScan" -Recurse -Include "*.lib", "*.pdb", "*.exp", "test", "tests" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
           
-          # Use 7-Zip with standard Zip format and high compression to stay well under 2GB
-          7z a -tzip -mx=7 VirtuaScan-v1.0.0-Windows-x64.zip ./dist/VirtuaScan
+          # Compress to .7z using LZMA2 ultra compression (drops archive size to under 1 GB)
+          7z a -t7z -m0=lzma2 -mx=9 -mfb=64 -md=32m -ms=on VirtuaScan-v1.0.0-Windows-x64.7z ./dist/VirtuaScan
 
       - name: Create GitHub Release & Upload Binary
         uses: softprops/action-gh-release@v2
@@ -57,7 +57,7 @@ jobs:
         with:
           name: "VirtuaScan v1.0.0 - Windows Release"
           prerelease: true
-          files: VirtuaScan-v1.0.0-Windows-x64.zip
+          files: VirtuaScan-v1.0.0-Windows-x64.7z
           body: |
             ### VirtuaScan v1.0.0 (Beta Preview)
 
@@ -81,6 +81,6 @@ jobs:
             ---
 
             ### Quick Start
-            1. Download and extract `VirtuaScan-v1.0.0-Windows-x64.zip`.
+            1. Download and extract `VirtuaScan-v1.0.0-Windows-x64.7z` (Windows 11 native extractor, 7-Zip, or WinRAR).
             2. Connect your Intel RealSense camera to a USB 3.0 port.
             3. Run `VirtuaScan.exe` inside the extracted folder.
